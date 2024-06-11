@@ -1,12 +1,15 @@
 import ky from "ky";
+import { getDocument, GlobalWorkerOptions } from "pdfjs-dist";
 import { useState } from "react";
 
-const PROD_SERVER_ORIGIN = "http://localhost:3000/api";
-const DEV_SERVER_ORIGIN = "/api";
+GlobalWorkerOptions.workerSrc = "/node_modules/pdfjs-dist/build/pdf.worker.mjs";
 
-const apiEndpoint = import.meta.env.DEV
-  ? DEV_SERVER_ORIGIN
-  : PROD_SERVER_ORIGIN;
+const PROD_SERVER_ORIGIN = "http://localhost:3000";
+const DEV_SERVER_ORIGIN = "";
+
+const origin = import.meta.env.DEV ? DEV_SERVER_ORIGIN : PROD_SERVER_ORIGIN;
+
+const apiEndpoint = `${origin}/api`;
 
 const api = ky.create({
   prefixUrl: apiEndpoint,
@@ -27,8 +30,26 @@ const postPDFUpload = async (body: FormData) => {
   }
 };
 
+const parsePDF = async (pdfURL: string) => {
+  const doc = await getDocument(pdfURL).promise;
+  const numPages = doc.numPages;
+
+  let textContent: string[] = [];
+
+  for (let i = 1; i <= numPages; i++) {
+    const page = await doc.getPage(i);
+    const textContentPage = await page.getTextContent();
+    textContent = [
+      ...textContent,
+      ...textContentPage.items.map((item) => ("str" in item ? item.str : "")),
+    ];
+  }
+
+  return textContent;
+};
+
 function App() {
-  const [pdfURL, setPDFURL] = useState<string>("");
+  const [content, setContent] = useState<string[]>([]);
 
   const onChagneFile = async (file: File | null) => {
     if (!file) return;
@@ -37,11 +58,11 @@ function App() {
     formData.append("pdf", file);
     const { filename } = await postPDFUpload(formData);
     if (filename) {
-      setPDFURL(`${apiEndpoint}/v1/${filename}`);
+      const pdfURL = `${origin}/uploads/${filename}`;
+      const content = await parsePDF(pdfURL);
+      setContent(content);
     }
   };
-
-  console.log(pdfURL);
 
   return (
     <div>
@@ -50,6 +71,7 @@ function App() {
         type="file"
         onChange={(e) => onChagneFile(e.target.files?.item(0) ?? null)}
       />
+      <p>{content}</p>
     </div>
   );
 }
