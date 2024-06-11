@@ -1,5 +1,17 @@
+import { useState } from "react";
+
 function App() {
-  return <div>홈페이지</div>;
+  const [file, setFile] = useState<File | null | undefined>(null);
+
+  return (
+    <div>
+      <input
+        id="pdf"
+        type="file"
+        onChange={(e) => setFile(e.target.files?.item(0))}
+      />
+    </div>
+  );
 }
 
 export default App;
