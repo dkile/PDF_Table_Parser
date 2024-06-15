@@ -5,7 +5,12 @@ import {
   PDFDocumentProxy,
   OPS,
 } from "pdfjs-dist";
-import { PDFPageProxy } from "pdfjs-dist/types/src/display/api";
+import {
+  PDFPageProxy,
+  TextContent,
+  TextItem,
+  TextMarkedContent,
+} from "pdfjs-dist/types/src/display/api";
 import { useRef, useState } from "react";
 
 GlobalWorkerOptions.workerSrc = "/node_modules/pdfjs-dist/build/pdf.worker.mjs";
@@ -43,14 +48,22 @@ const postPDFUpload = async (body: FormData) => {
   }
 };
 
-type Line = {
+type Point = {
   x: number;
   y: number;
+};
+
+type Line = Point & {
   width: number;
   height: number;
 };
 
-const extractTable = async (page: PDFPageProxy) => {
+type Cell = Point & {
+  width: number;
+  height: number;
+};
+
+const extractTable = async (page: PDFPageProxy): Promise<Cell[][]> => {
   const operatorList = await page.getOperatorList();
   const lines: Line[] = [];
   let currentLineWidth: number | null = null;
@@ -118,7 +131,9 @@ const extractTable = async (page: PDFPageProxy) => {
   const horizontalMergedLines = mergeHorizontalLines(uniqueLines);
   const verticalMergedLines = mergeVerticalLines(uniqueLines);
 
-  const cells = generateCells(verticalMergedLines, horizontalMergedLines);
+  const cells = groupCellsByRow(
+    generateCells(verticalMergedLines, horizontalMergedLines)
+  );
 
   return cells;
 };
@@ -135,6 +150,8 @@ const areLinesEqual = (line1: Line, line2: Line): boolean => {
 const mergeHorizontalLines = (lines: Line[]): Line[] => {
   const horizontalLines = lines.filter((line) => line.height === 0);
   const mergedLines: Line[] = [];
+
+  if (horizontalLines.length === 0) return [];
 
   horizontalLines.sort((a, b) => b.y - a.y || a.x - b.x);
 
@@ -169,6 +186,8 @@ const mergeVerticalLines = (lines: Line[]): Line[] => {
   const verticalLines = lines.filter((line) => line.width === 0);
   const mergedLines: Line[] = [];
 
+  if (verticalLines.length === 0) return [];
+
   verticalLines.sort((a, b) => a.x - b.x || b.y - a.y);
 
   let mLine: Line = {
@@ -198,14 +217,23 @@ const mergeVerticalLines = (lines: Line[]): Line[] => {
   return mergedLines;
 };
 
-type Point = {
-  x: number;
-  y: number;
-};
+const groupCellsByRow = (cells: Cell[]): Cell[][] => {
+  const rowMap: Map<number, Cell[]> = new Map();
+  cells.sort((a, b) => b.y - a.y);
 
-type Cell = Point & {
-  width: number;
-  height: number;
+  cells.forEach((cell) => {
+    const yKey = Math.round(cell.y / 2) * 2;
+    if (!rowMap.has(yKey)) {
+      rowMap.set(yKey, []);
+    }
+    rowMap.get(yKey)!.push(cell);
+  });
+
+  const groupedCells: Cell[][] = Array.from(rowMap.values());
+
+  groupedCells.forEach((row) => row.sort((a, b) => a.x - b.x));
+
+  return groupedCells;
 };
 
 const generateCells = (
@@ -213,6 +241,7 @@ const generateCells = (
   horizontalLines: Line[]
 ): Cell[] => {
   const cells: Cell[] = [];
+  if (verticalLines.length === 0 || horizontalLines.length === 0) return [];
 
   const bottomY = Math.min(
     ...verticalLines.map((line) => line.y - line.height)
@@ -265,9 +294,6 @@ const generateCells = (
   const { filteredHorizontalLines, filteredVerticalLines } =
     filterLinesWithTwoOrMoreIntersections(verticalLines, horizontalLines);
 
-  filteredVerticalLines.sort((a, b) => b.y - a.y || a.x - b.x);
-  filteredHorizontalLines.sort((a, b) => b.y - a.y || a.x - b.x);
-
   for (let i = 0; i < filteredHorizontalLines.length - 1; i++) {
     for (let j = 0; j < filteredVerticalLines.length - 1; j++) {
       const leftLine = filteredVerticalLines[j];
@@ -300,6 +326,9 @@ const filterLinesWithTwoOrMoreIntersections = (
   horizontalLines: Line[]
 ): { filteredVerticalLines: Line[]; filteredHorizontalLines: Line[] } => {
   const intersectionCount = new Map<Line, number>();
+
+  verticalLines.sort((a, b) => b.y - a.y || a.x - b.x);
+  horizontalLines.sort((a, b) => b.y - a.y || a.x - b.x);
 
   verticalLines.forEach((vLine) => {
     horizontalLines.forEach((hLine) => {
@@ -395,10 +424,64 @@ const renderPage = async (
   }
 };
 
+const isTextItem = (txt: TextItem | TextMarkedContent): txt is TextItem => {
+  return "str" in txt;
+};
+
+const extractTableContent = (
+  table: Cell[][],
+  content: TextContent
+): TextItem[][][] => {
+  const textItems = content.items.filter(isTextItem);
+
+  const contentInTable: TextItem[][][] = [];
+  for (const row of table) {
+    const contentInRow = [];
+    for (const cell of row) {
+      const contentInCell = [];
+      for (const text of textItems) {
+        const textPos = { x: text.transform[4], y: text.transform[5] };
+        const isInCell =
+          cell.x < textPos.x &&
+          textPos.x < cell.x + cell.width &&
+          cell.y - cell.height < textPos.y &&
+          textPos.y < cell.y;
+
+        if (isInCell) {
+          contentInCell.push(text);
+        }
+      }
+      contentInRow.push(contentInCell);
+    }
+    contentInTable.push(contentInRow);
+  }
+
+  return contentInTable;
+};
+
+const joinTextInSameCell = (textItems: TextItem[]) => {
+  const lineMap = new Map<number, TextItem[]>();
+  for (const text of textItems) {
+    const y = text.transform[5];
+
+    lineMap.set(y, [...(lineMap.get(y) ?? []), text]);
+  }
+  for (const y of lineMap.keys()) {
+    lineMap.get(y)!.sort((a, b) => a.transform[4] - b.transform[4]);
+  }
+  const lines = [...lineMap]
+    .map(([y, items]) => ({ y, str: items.map((text) => text.str).join("") }))
+    .sort(({ y: y1 }, { y: y2 }) => y2 - y1)
+    .flatMap(({ str }) => str);
+
+  return lines.join("\n");
+};
+
 function App() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [pageNum, setPageNum] = useState(1);
   const [pdf, setPDF] = useState<PDFDocumentProxy | null>(null);
+  const [tableContent, setTableContent] = useState<string[][][]>([]);
 
   const handleChagneFile = async (file: File | null) => {
     if (!file) return;
@@ -421,7 +504,29 @@ function App() {
         const table = await extractTable(page);
         tables.push(table);
       }
-      console.log(tables);
+      const contentList = await Promise.all([
+        ...pages.map((page) => page.getTextContent()),
+      ]);
+
+      const contentInTables = tables
+        .map((table, i) => [table, contentList[i]] as const)
+        .filter(
+          ([table, content]) => table.length !== 0 && content.items.length !== 0
+        )
+        .map(([table, content]) => extractTableContent(table, content));
+
+      const joinedContentInTables: string[][][] = [];
+
+      for (const table of contentInTables) {
+        const joinedTable = [];
+        for (const row of table) {
+          const joinedRow = row.map(joinTextInSameCell);
+          joinedTable.push(joinedRow);
+        }
+        joinedContentInTables.push(joinedTable);
+      }
+
+      setTableContent(joinedContentInTables);
     }
   };
 
@@ -455,14 +560,17 @@ function App() {
       />
       <canvas ref={canvasRef} />
       {pdf ? (
-        <div>
-          <button type="button" onClick={handleClickPrev}>
-            prev
-          </button>
-          <button type="button" onClick={handleClickNext}>
-            next
-          </button>
-        </div>
+        <>
+          <div>
+            <button type="button" onClick={handleClickPrev}>
+              prev
+            </button>
+            <button type="button" onClick={handleClickNext}>
+              next
+            </button>
+          </div>
+          <div>{JSON.stringify(tableContent)}</div>
+        </>
       ) : null}
     </div>
   );
