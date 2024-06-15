@@ -26,6 +26,8 @@ for (const op in OPS) {
   ops.set((OPS as Record<string, number>)[op], op);
 }
 
+const throttle = 0.5;
+
 const postPDFUpload = async (body: FormData) => {
   try {
     const res = await api
@@ -100,11 +102,18 @@ const extractTable = async (page: PDFPageProxy) => {
   });
 
   const uniqueLines: Line[] = [];
-  lines.forEach((line) => {
-    if (!uniqueLines.some((uniqueLine) => areLinesEqual(uniqueLine, line))) {
-      uniqueLines.push(line);
-    }
-  });
+  lines
+    .map((line) => ({
+      x: Number(line.x.toFixed(3)),
+      y: Number(line.y.toFixed(3)),
+      width: Number(line.width.toFixed(3)),
+      height: Number(line.height.toFixed(3)),
+    }))
+    .forEach((line) => {
+      if (!uniqueLines.some((uniqueLine) => areLinesEqual(uniqueLine, line))) {
+        uniqueLines.push(line);
+      }
+    });
 
   const horizontalMergedLines = mergeHorizontalLines(uniqueLines);
   const verticalMergedLines = mergeVerticalLines(uniqueLines);
@@ -115,8 +124,6 @@ const extractTable = async (page: PDFPageProxy) => {
 };
 
 const areLinesEqual = (line1: Line, line2: Line): boolean => {
-  const throttle = 2;
-
   return (
     Math.abs(line1.x - line2.x) <= throttle &&
     Math.abs(line1.y - line2.y) <= throttle &&
@@ -128,7 +135,6 @@ const areLinesEqual = (line1: Line, line2: Line): boolean => {
 const mergeHorizontalLines = (lines: Line[]): Line[] => {
   const horizontalLines = lines.filter((line) => line.height === 0);
   const mergedLines: Line[] = [];
-  const throttle = 2;
 
   horizontalLines.sort((a, b) => b.y - a.y || a.x - b.x);
 
@@ -162,7 +168,6 @@ const mergeHorizontalLines = (lines: Line[]): Line[] => {
 const mergeVerticalLines = (lines: Line[]): Line[] => {
   const verticalLines = lines.filter((line) => line.width === 0);
   const mergedLines: Line[] = [];
-  const throttle = 2;
 
   verticalLines.sort((a, b) => a.x - b.x || b.y - a.y);
 
@@ -212,42 +217,46 @@ const generateCells = (
   const bottomY = Math.min(
     ...verticalLines.map((line) => line.y - line.height)
   );
+  const bottomVerticalLines = verticalLines.filter(
+    (line) => Math.abs(bottomY - (line.y - line.height)) < 1
+  );
+  bottomVerticalLines.sort((a, b) => a.x - b.x);
+  const bottomLeft = bottomVerticalLines[0];
+  const bottomRight = bottomVerticalLines[bottomVerticalLines.length - 1];
+
   const [mostBottomLine] = horizontalLines.filter(
-    (line) => Math.abs(line.y - bottomY) < 1
+    (line) =>
+      Math.abs(line.y - bottomY) < 1 &&
+      Math.abs(line.width - (bottomRight.x - bottomLeft.x)) < 1
   );
   if (!mostBottomLine) {
-    const bottomVerticalLines = verticalLines.filter(
-      (line) => Math.abs(bottomY - (line.y - line.height)) < 1
-    );
-    bottomVerticalLines.sort((a, b) => a.x - b.x);
-    const left = bottomVerticalLines[0];
-    const right = bottomVerticalLines[bottomVerticalLines.length - 1];
-
     const newBottomLine: Line = {
-      x: left.x,
+      x: bottomLeft.x,
       y: bottomY,
-      width: right.x - left.x,
+      width: bottomRight.x - bottomLeft.x,
       height: 0,
     };
     horizontalLines.push(newBottomLine);
   }
 
-  const topY = Math.max(...horizontalLines.map((line) => line.y));
+  const topY = Math.max(...verticalLines.map((line) => line.y));
+  const topVerticalLines = verticalLines.filter(
+    (line) => Math.abs(topY - line.y) < 1
+  );
+  topVerticalLines.sort((a, b) => a.x - b.x);
+  const topLeft = topVerticalLines[0];
+  const topRight = topVerticalLines[topVerticalLines.length - 1];
+
   const [mostTopLine] = horizontalLines.filter(
-    (line) => Math.abs(line.y - topY) < 1
+    (line) =>
+      Math.abs(line.y - topY) < 1 &&
+      Math.abs(line.width - (topRight.x - topLeft.x)) < 1
   );
   if (!mostTopLine) {
-    const topVerticalLines = verticalLines.filter(
-      (line) => Math.abs(topY - line.y) < 1
-    );
-    topVerticalLines.sort((a, b) => a.x - b.x);
-    const left = topVerticalLines[0];
-    const right = topVerticalLines[topVerticalLines.length - 1];
-
     const newTopLine: Line = {
-      x: left.x,
+      x: topLeft.x,
       y: topY,
-      width: right.x - left.x,
+      width: topRight.x - topLeft.x,
       height: 0,
     };
     horizontalLines.push(newTopLine);
@@ -360,10 +369,10 @@ const isPointOnLineSegment = (px: number, py: number, line: Line): boolean => {
   const yEnd = y - height;
 
   return (
-    Math.min(x, xEnd) - 1 <= px &&
-    px <= Math.max(x, xEnd) + 1 &&
-    Math.min(y, yEnd) - 1 <= py &&
-    py <= Math.max(y, yEnd) + 1
+    Math.min(x, xEnd) - 0.1 <= px &&
+    px <= Math.max(x, xEnd) + 0.1 &&
+    Math.min(y, yEnd) - 0.1 <= py &&
+    py <= Math.max(y, yEnd) + 0.1
   );
 };
 
@@ -390,9 +399,6 @@ function App() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [pageNum, setPageNum] = useState(1);
   const [pdf, setPDF] = useState<PDFDocumentProxy | null>(null);
-  const [pageTableContent, setPageTableContent] = useState<
-    [string, string][][]
-  >([]);
 
   const handleChagneFile = async (file: File | null) => {
     if (!file) return;
@@ -410,7 +416,11 @@ function App() {
           (pageNum) => pdf.getPage(pageNum)
         )
       );
-      const tables = await Promise.all(pages.map((page) => extractTable(page)));
+      const tables = [];
+      for (const page of pages) {
+        const table = await extractTable(page);
+        tables.push(table);
+      }
       console.log(tables);
     }
   };
@@ -454,7 +464,6 @@ function App() {
           </button>
         </div>
       ) : null}
-      <div>{JSON.stringify(pageTableContent)}</div>
     </div>
   );
 }
