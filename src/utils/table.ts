@@ -82,8 +82,8 @@ export const extractTable = async (page: PDFPageProxy): Promise<Cell[][]> => {
   const lines = pathArgs.flatMap(processConstructPath);
   const uniqueLines = removeDuplicateLines(lines);
 
-  const horizontalMergedLines = mergeHorizontalLines(uniqueLines);
-  const verticalMergedLines = mergeVerticalLines(uniqueLines);
+  const horizontalMergedLines = mergeOverlappingHorizontalLines(uniqueLines);
+  const verticalMergedLines = mergeOverlappingVerticalLines(uniqueLines);
 
   const cells = groupCellsByRow(
     generateCells(verticalMergedLines, horizontalMergedLines)
@@ -120,7 +120,7 @@ const areLinesEqual = (line1: Line, line2: Line): boolean => {
   );
 };
 
-const mergeHorizontalLines = (lines: Line[]): Line[] => {
+const mergeOverlappingHorizontalLines = (lines: Line[]): Line[] => {
   const horizontalLines = lines.filter((line) => line.height === 0);
   const mergedLines: Line[] = [];
 
@@ -155,7 +155,7 @@ const mergeHorizontalLines = (lines: Line[]): Line[] => {
   return mergedLines;
 };
 
-const mergeVerticalLines = (lines: Line[]): Line[] => {
+const mergeOverlappingVerticalLines = (lines: Line[]): Line[] => {
   const verticalLines = lines.filter((line) => line.width === 0);
   const mergedLines: Line[] = [];
 
