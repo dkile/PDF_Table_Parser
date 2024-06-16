@@ -20,60 +20,81 @@ type Cell = Point & {
   height: number;
 };
 
+type OPSKey = keyof typeof OPS;
+
+type OPSValue = (typeof OPS)[OPSKey];
+
 const throttle = 0.5;
 
-export const extractTable = async (page: PDFPageProxy): Promise<Cell[][]> => {
-  const operatorList = await page.getOperatorList();
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const processConstructPath = (pathArg: any[]) => {
+  const ops: OPSValue[] = pathArg[0];
+  const args: OPSValue[] = pathArg[1];
+
+  let cur: Point | undefined;
   const lines: Line[] = [];
-  let currentLineWidth: number | null = null;
+  let pathIndex = 0;
+  ops.forEach((op) => {
+    switch (op) {
+      case OPS.moveTo: {
+        cur = { x: args[pathIndex++], y: args[pathIndex++] };
+        break;
+      }
+      case OPS.lineTo: {
+        if (!cur) break;
 
-  operatorList.fnArray.forEach((fnId, i) => {
-    const args = operatorList.argsArray[i];
+        const to = { x: args[pathIndex++], y: args[pathIndex++] };
+        const newLine: Line = {
+          x: Math.min(cur.x, to.x),
+          y: Math.max(cur.y, to.y),
+          width: Math.abs(to.x - cur.x),
+          height: Math.abs(to.y - cur.y),
+        };
 
-    if (fnId === OPS.constructPath) {
-      const pathOps: number[] = args[0];
-      const pathArgs: number[] = args[1];
-      let x1: number | undefined,
-        y1: number | undefined,
-        x2: number,
-        y2: number;
-
-      let pathIndex = 0;
-      pathOps.forEach((op) => {
-        if (op === OPS.moveTo) {
-          x1 = pathArgs[pathIndex++];
-          y1 = pathArgs[pathIndex++];
-        } else if (op === OPS.lineTo && x1 !== undefined && y1 !== undefined) {
-          x2 = pathArgs[pathIndex++];
-          y2 = pathArgs[pathIndex++];
-          const x = Math.min(x1, x2);
-          const y = Math.max(y1, y2);
-          const width = Math.abs(x2 - x1);
-          const height = Math.abs(y2 - y1);
-
-          if (currentLineWidth !== null && currentLineWidth > 0) {
-            lines.push({ x, y, width, height });
-          }
-          x1 = x2;
-          y1 = y2;
-        } else {
-          if (op === OPS.curveTo) {
-            pathIndex += 6;
-          } else if (op === OPS.curveTo2) {
-            pathIndex += 4;
-          } else if (op === OPS.curveTo3) {
-            pathIndex += 4;
-          } else if (op === OPS.closePath) {
-            // closePath has no arguments
-          }
-        }
-      });
-    } else if (fnId === OPS.setLineWidth) {
-      currentLineWidth = args[0];
+        lines.push(newLine);
+        cur = to;
+        break;
+      }
+      case OPS.curveTo: {
+        pathIndex += 6;
+        break;
+      }
+      case (OPS.curveTo2, OPS.curveTo3): {
+        pathIndex += 4;
+        break;
+      }
+      case OPS.closePath: {
+        break;
+      }
     }
   });
 
+  return lines;
+};
+
+export const extractTable = async (page: PDFPageProxy): Promise<Cell[][]> => {
+  const operatorList = await page.getOperatorList();
+  const pathArgs = operatorList.fnArray
+    .map((fnId, i) => ({ fnId, index: i }))
+    .filter(({ fnId }) => fnId === OPS.constructPath)
+    .map(({ index }) => operatorList.argsArray[index]);
+
+  const lines = pathArgs.flatMap(processConstructPath);
+  const uniqueLines = removeDuplicateLines(lines);
+
+  const horizontalMergedLines = mergeHorizontalLines(uniqueLines);
+  const verticalMergedLines = mergeVerticalLines(uniqueLines);
+
+  const cells = groupCellsByRow(
+    generateCells(verticalMergedLines, horizontalMergedLines)
+  );
+
+  return cells;
+};
+
+const removeDuplicateLines = (lines: Line[]) => {
   const uniqueLines: Line[] = [];
+
   lines
     .map((line) => ({
       x: Number(line.x.toFixed(3)),
@@ -87,14 +108,7 @@ export const extractTable = async (page: PDFPageProxy): Promise<Cell[][]> => {
       }
     });
 
-  const horizontalMergedLines = mergeHorizontalLines(uniqueLines);
-  const verticalMergedLines = mergeVerticalLines(uniqueLines);
-
-  const cells = groupCellsByRow(
-    generateCells(verticalMergedLines, horizontalMergedLines)
-  );
-
-  return cells;
+  return uniqueLines;
 };
 
 const areLinesEqual = (line1: Line, line2: Line): boolean => {
@@ -156,12 +170,12 @@ const mergeVerticalLines = (lines: Line[]): Line[] => {
     height: verticalLines[0].height,
   };
   for (const line of verticalLines) {
-    const isSameX = Math.abs(line.x - mLine.x) < throttle;
-    const isBetween =
+    const isOverlapped =
+      Math.abs(line.x - mLine.x) < throttle &&
       line.y >= mLine.y - mLine.height - throttle &&
       line.y <= mLine.y + throttle;
 
-    if (isSameX && isBetween) {
+    if (isOverlapped) {
       const newY = Math.max(line.y, mLine.y);
       const newHeight =
         newY - Math.min(line.y - line.height, mLine.y - mLine.height);
