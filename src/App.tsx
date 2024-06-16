@@ -483,7 +483,7 @@ function App() {
   const [pdf, setPDF] = useState<PDFDocumentProxy | null>(null);
   const [tableContent, setTableContent] = useState<string[][][]>([]);
 
-  const handleChagneFile = async (file: File | null) => {
+  const handleChangeFile = async (file: File | null) => {
     if (!file) return;
 
     const formData = new FormData();
@@ -556,7 +556,8 @@ function App() {
       <input
         id="pdf"
         type="file"
-        onChange={(e) => handleChagneFile(e.target.files?.item(0) ?? null)}
+        accept=".pdf"
+        onChange={(e) => handleChangeFile(e.target.files?.item(0) ?? null)}
       />
       <canvas ref={canvasRef} />
       {pdf ? (
